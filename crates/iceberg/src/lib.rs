@@ -40,7 +40,7 @@ pub use catalog::TableUpdate;
 #[allow(dead_code)]
 pub mod table;
 
-mod avro;
+pub mod avro;
 pub mod io;
 pub mod spec;
 

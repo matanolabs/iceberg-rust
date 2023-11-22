@@ -17,5 +17,5 @@
 
 //! Avro related codes.
 #[allow(dead_code)]
-mod schema;
-pub(crate) use schema::*;
+pub mod schema;
+pub use schema::*;
