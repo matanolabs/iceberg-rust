@@ -22,9 +22,9 @@ members = ["crates/catalog/*", "crates/iceberg"]
 [workspace.dependencies]
 anyhow = "1.0.72"
 apache-avro = "0.16"
-arrow-arith = { version = "49.0.0" }
-arrow-array = { version = "49.0.0" }
-arrow-schema = { version = "49.0.0" }
+arrow-arith = { version = "51.0.0" }
+arrow-array = { version = "51.0.0" }
+arrow-schema = { version = "51.0.0" }
 async-trait = "0.1"
 bimap = "0.6"
 bitvec = "1.0.1"
