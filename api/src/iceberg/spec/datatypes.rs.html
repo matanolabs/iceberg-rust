@@ -1180,6 +1180,12 @@
 <a href="#1180" id="1180">1180</a>
 <a href="#1181" id="1181">1181</a>
 <a href="#1182" id="1182">1182</a>
+<a href="#1183" id="1183">1183</a>
+<a href="#1184" id="1184">1184</a>
+<a href="#1185" id="1185">1185</a>
+<a href="#1186" id="1186">1186</a>
+<a href="#1187" id="1187">1187</a>
+<a href="#1188" id="1188">1188</a>
 </pre></div><pre class="rust"><code><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -1698,10 +1704,12 @@
 /// Fields may have an optional comment or doc string. Fields can have default values.
 </span><span class="kw">pub struct </span>NestedField {
     <span class="doccomment">/// Id unique in table schema
+    </span><span class="attr">#[serde(default)]
     </span><span class="kw">pub </span>id: i32,
     <span class="doccomment">/// Field Name
     </span><span class="kw">pub </span>name: String,
     <span class="doccomment">/// Optional or required
+    </span><span class="attr">#[serde(default)]
     </span><span class="kw">pub </span>required: bool,
     <span class="doccomment">/// Datatype
     </span><span class="kw">pub </span>field_type: Box&lt;Type&gt;,
@@ -1716,9 +1724,11 @@
 <span class="attr">#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(rename_all = <span class="string">"kebab-case"</span>)]
 </span><span class="kw">struct </span>SerdeNestedField {
-    <span class="kw">pub </span>id: i32,
+    <span class="attr">#[serde(default)]
+    </span><span class="kw">pub </span>id: i32,
     <span class="kw">pub </span>name: String,
-    <span class="kw">pub </span>required: bool,
+    <span class="attr">#[serde(default)]
+    </span><span class="kw">pub </span>required: bool,
     <span class="attr">#[serde(rename = <span class="string">"type"</span>)]
     </span><span class="kw">pub </span>field_type: Box&lt;Type&gt;,
     <span class="attr">#[serde(skip_serializing_if = <span class="string">"Option::is_none"</span>)]
@@ -1908,8 +1918,10 @@
         <span class="attr">#[serde(rename_all = <span class="string">"kebab-case"</span>)]
         </span>List {
             r#type: String,
-            element_id: i32,
-            element_required: bool,
+            <span class="attr">#[serde(default)]
+            </span>element_id: i32,
+            <span class="attr">#[serde(default)]
+            </span>element_required: bool,
             element: Cow&lt;<span class="lifetime">'a</span>, Type&gt;,
         },
         Struct {
