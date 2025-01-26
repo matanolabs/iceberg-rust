@@ -240,7 +240,8 @@ impl Catalog for MemoryCatalog {
     async fn drop_table(&self, table_ident: &TableIdent) -> Result<()> {
         let mut root_namespace_state = self.root_namespace_state.lock().await;
 
-        root_namespace_state.remove_existing_table(table_ident)
+        let metadata_location = root_namespace_state.remove_existing_table(table_ident)?;
+        self.file_io.delete(&metadata_location).await
     }
 
     /// Check if a table exists in the catalog.
@@ -285,7 +286,7 @@ mod tests {
     use std::iter::FromIterator;
 
     use iceberg::io::FileIOBuilder;
-    use iceberg::spec::{BoundPartitionSpec, NestedField, PrimitiveType, Schema, SortOrder, Type};
+    use iceberg::spec::{NestedField, PartitionSpec, PrimitiveType, Schema, SortOrder, Type};
     use regex::Regex;
     use tempfile::TempDir;
 
@@ -357,7 +358,7 @@ mod tests {
 
         assert_eq!(metadata.current_schema().as_ref(), expected_schema);
 
-        let expected_partition_spec = BoundPartitionSpec::builder((*expected_schema).clone())
+        let expected_partition_spec = PartitionSpec::builder((*expected_schema).clone())
             .with_spec_id(0)
             .build()
             .unwrap();
@@ -367,7 +368,7 @@ mod tests {
                 .partition_specs_iter()
                 .map(|p| p.as_ref())
                 .collect_vec(),
-            vec![&expected_partition_spec.into_schemaless()]
+            vec![&expected_partition_spec]
         );
 
         let expected_sorted_order = SortOrder::builder()

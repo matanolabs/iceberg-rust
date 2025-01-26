@@ -18,7 +18,17 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import current_date, date_add, expr
 
-spark = SparkSession.builder.getOrCreate()
+# The configuration is important, otherwise we get many small
+# parquet files with a single row. When a positional delete
+# hits the Parquet file with one row, the parquet file gets
+# dropped instead of having a merge-on-read delete file.
+spark = (
+    SparkSession
+        .builder
+        .config("spark.sql.shuffle.partitions", "1")
+        .config("spark.default.parallelism", "1")
+        .getOrCreate()
+)
 
 spark.sql(
     f"""
@@ -97,3 +107,37 @@ VALUES
 #  Creates two positional deletes that should be merged
 spark.sql(f"DELETE FROM rest.default.test_positional_merge_on_read_double_deletes WHERE number = 9")
 spark.sql(f"DELETE FROM rest.default.test_positional_merge_on_read_double_deletes WHERE letter == 'f'")
+
+#  Create a table, and do some renaming
+spark.sql("CREATE OR REPLACE TABLE rest.default.test_rename_column (lang string) USING iceberg")
+spark.sql("INSERT INTO rest.default.test_rename_column VALUES ('Python')")
+spark.sql("ALTER TABLE rest.default.test_rename_column RENAME COLUMN lang TO language")
+spark.sql("INSERT INTO rest.default.test_rename_column VALUES ('Java')")
+
+#  Create a table, and do some evolution
+spark.sql("CREATE OR REPLACE TABLE rest.default.test_promote_column (foo int) USING iceberg")
+spark.sql("INSERT INTO rest.default.test_promote_column VALUES (19)")
+spark.sql("ALTER TABLE rest.default.test_promote_column ALTER COLUMN foo TYPE bigint")
+spark.sql("INSERT INTO rest.default.test_promote_column VALUES (25)")
+
+#  Create a table with various types
+spark.sql("""
+CREATE OR REPLACE TABLE rest.default.types_test USING ICEBERG AS 
+SELECT
+    CAST(s % 2 = 1 AS BOOLEAN) AS cboolean,
+    CAST(s % 256 - 128 AS TINYINT) AS ctinyint,
+    CAST(s AS SMALLINT) AS csmallint,
+    CAST(s AS INT) AS cint,
+    CAST(s AS BIGINT) AS cbigint,
+    CAST(s AS FLOAT) AS cfloat,
+    CAST(s AS DOUBLE) AS cdouble,
+    CAST(s / 100.0 AS DECIMAL(8, 2)) AS cdecimal,
+    CAST(DATE('1970-01-01') + s AS DATE) AS cdate,
+    CAST(from_unixtime(s) AS TIMESTAMP_NTZ) AS ctimestamp_ntz,
+    CAST(from_unixtime(s) AS TIMESTAMP) AS ctimestamp,
+    CAST(s AS STRING) AS cstring,
+    CAST(s AS BINARY) AS cbinary
+FROM (
+    SELECT EXPLODE(SEQUENCE(0, 1000)) AS s
+);
+""")

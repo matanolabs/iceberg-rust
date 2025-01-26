@@ -73,6 +73,7 @@ pub mod avro;
 pub mod io;
 pub mod spec;
 
+pub mod inspect;
 pub mod scan;
 
 pub mod expr;
@@ -84,3 +85,5 @@ mod runtime;
 pub mod arrow;
 mod utils;
 pub mod writer;
+
+mod puffin;

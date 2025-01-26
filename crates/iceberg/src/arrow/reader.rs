@@ -25,13 +25,14 @@ use std::sync::Arc;
 use arrow_arith::boolean::{and, is_not_null, is_null, not, or};
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch};
 use arrow_ord::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
-use arrow_schema::{ArrowError, DataType, SchemaRef as ArrowSchemaRef};
+use arrow_schema::{
+    ArrowError, DataType, FieldRef, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+};
 use arrow_string::like::starts_with;
 use bytes::Bytes;
 use fnv::FnvHashSet;
-use futures::channel::mpsc::{channel, Sender};
 use futures::future::BoxFuture;
-use futures::{try_join, FutureExt, SinkExt, StreamExt, TryFutureExt, TryStreamExt};
+use futures::{try_join, FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use parquet::arrow::arrow_reader::{ArrowPredicateFn, ArrowReaderOptions, RowFilter, RowSelection};
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask, PARQUET_FIELD_ID_META_KEY};
@@ -46,9 +47,8 @@ use crate::expr::visitors::page_index_evaluator::PageIndexEvaluator;
 use crate::expr::visitors::row_group_metrics_evaluator::RowGroupMetricsEvaluator;
 use crate::expr::{BoundPredicate, BoundReference};
 use crate::io::{FileIO, FileMetadata, FileRead};
-use crate::runtime::spawn;
 use crate::scan::{ArrowRecordBatchStream, FileScanTask, FileScanTaskStream};
-use crate::spec::{Datum, Schema};
+use crate::spec::{Datum, NestedField, PrimitiveType, Schema, Type};
 use crate::utils::available_parallelism;
 use crate::{Error, ErrorKind};
 
@@ -128,62 +128,41 @@ pub struct ArrowReader {
 impl ArrowReader {
     /// Take a stream of FileScanTasks and reads all the files.
     /// Returns a stream of Arrow RecordBatches containing the data from the files
-    pub fn read(self, tasks: FileScanTaskStream) -> Result<ArrowRecordBatchStream> {
+    pub async fn read(self, tasks: FileScanTaskStream) -> Result<ArrowRecordBatchStream> {
         let file_io = self.file_io.clone();
         let batch_size = self.batch_size;
         let concurrency_limit_data_files = self.concurrency_limit_data_files;
         let row_group_filtering_enabled = self.row_group_filtering_enabled;
         let row_selection_enabled = self.row_selection_enabled;
 
-        let (tx, rx) = channel(concurrency_limit_data_files);
-        let mut channel_for_error = tx.clone();
+        let stream = tasks
+            .map_ok(move |task| {
+                let file_io = file_io.clone();
 
-        spawn(async move {
-            let result = tasks
-                .map(|task| Ok((task, file_io.clone(), tx.clone())))
-                .try_for_each_concurrent(
-                    concurrency_limit_data_files,
-                    |(file_scan_task, file_io, tx)| async move {
-                        match file_scan_task {
-                            Ok(task) => {
-                                let file_path = task.data_file_path.to_string();
-
-                                spawn(async move {
-                                    Self::process_file_scan_task(
-                                        task,
-                                        batch_size,
-                                        file_io,
-                                        tx,
-                                        row_group_filtering_enabled,
-                                        row_selection_enabled,
-                                    )
-                                    .await
-                                })
-                                .await
-                                .map_err(|e| e.with_context("file_path", file_path))
-                            }
-                            Err(err) => Err(err),
-                        }
-                    },
+                Self::process_file_scan_task(
+                    task,
+                    batch_size,
+                    file_io,
+                    row_group_filtering_enabled,
+                    row_selection_enabled,
                 )
-                .await;
+            })
+            .map_err(|err| {
+                Error::new(ErrorKind::Unexpected, "file scan task generate failed").with_source(err)
+            })
+            .try_buffer_unordered(concurrency_limit_data_files)
+            .try_flatten_unordered(concurrency_limit_data_files);
 
-            if let Err(error) = result {
-                let _ = channel_for_error.send(Err(error)).await;
-            }
-        });
-
-        return Ok(rx.boxed());
+        Ok(Box::pin(stream) as ArrowRecordBatchStream)
     }
 
     async fn process_file_scan_task(
         task: FileScanTask,
         batch_size: Option<usize>,
         file_io: FileIO,
-        mut tx: Sender<Result<RecordBatch>>,
         row_group_filtering_enabled: bool,
         row_selection_enabled: bool,
-    ) -> Result<()> {
+    ) -> Result<ArrowRecordBatchStream> {
         // Get the metadata for the Parquet file we need to read and build
         // a reader for the data within
         let parquet_file = file_io.new_input(&task.data_file_path)?;
@@ -267,14 +246,15 @@ impl ArrowReader {
 
         // Build the batch stream and send all the RecordBatches that it generates
         // to the requester.
-        let mut record_batch_stream = record_batch_stream_builder.build()?;
+        let record_batch_stream =
+            record_batch_stream_builder
+                .build()?
+                .map(move |batch| match batch {
+                    Ok(batch) => record_batch_transformer.process_record_batch(batch),
+                    Err(err) => Err(err.into()),
+                });
 
-        while let Some(batch) = record_batch_stream.try_next().await? {
-            tx.send(record_batch_transformer.process_record_batch(batch))
-                .await?
-        }
-
-        Ok(())
+        Ok(Box::pin(record_batch_stream) as ArrowRecordBatchStream)
     }
 
     fn build_field_id_set_and_map(
@@ -293,35 +273,94 @@ impl ArrowReader {
         Ok((iceberg_field_ids, field_id_map))
     }
 
+    /// Insert the leaf field id into the field_ids using for projection.
+    /// For nested type, it will recursively insert the leaf field id.
+    fn include_leaf_field_id(field: &NestedField, field_ids: &mut Vec<i32>) {
+        match field.field_type.as_ref() {
+            Type::Primitive(_) => {
+                field_ids.push(field.id);
+            }
+            Type::Struct(struct_type) => {
+                for nested_field in struct_type.fields() {
+                    Self::include_leaf_field_id(nested_field, field_ids);
+                }
+            }
+            Type::List(list_type) => {
+                Self::include_leaf_field_id(&list_type.element_field, field_ids);
+            }
+            Type::Map(map_type) => {
+                Self::include_leaf_field_id(&map_type.key_field, field_ids);
+                Self::include_leaf_field_id(&map_type.value_field, field_ids);
+            }
+        }
+    }
+
     fn get_arrow_projection_mask(
         field_ids: &[i32],
         iceberg_schema_of_task: &Schema,
         parquet_schema: &SchemaDescriptor,
         arrow_schema: &ArrowSchemaRef,
     ) -> Result<ProjectionMask> {
-        if field_ids.is_empty() {
+        fn type_promotion_is_valid(
+            file_type: Option<&PrimitiveType>,
+            projected_type: Option<&PrimitiveType>,
+        ) -> bool {
+            match (file_type, projected_type) {
+                (Some(lhs), Some(rhs)) if lhs == rhs => true,
+                (Some(PrimitiveType::Int), Some(PrimitiveType::Long)) => true,
+                (Some(PrimitiveType::Float), Some(PrimitiveType::Double)) => true,
+                (
+                    Some(PrimitiveType::Decimal {
+                        precision: file_precision,
+                        scale: file_scale,
+                    }),
+                    Some(PrimitiveType::Decimal {
+                        precision: requested_precision,
+                        scale: requested_scale,
+                    }),
+                ) if requested_precision >= file_precision && file_scale == requested_scale => true,
+                // Uuid will be store as Fixed(16) in parquet file, so the read back type will be Fixed(16).
+                (Some(PrimitiveType::Fixed(16)), Some(PrimitiveType::Uuid)) => true,
+                _ => false,
+            }
+        }
+
+        let mut leaf_field_ids = vec![];
+        for field_id in field_ids {
+            let field = iceberg_schema_of_task.field_by_id(*field_id);
+            if let Some(field) = field {
+                Self::include_leaf_field_id(field, &mut leaf_field_ids);
+            }
+        }
+
+        if leaf_field_ids.is_empty() {
             Ok(ProjectionMask::all())
         } else {
             // Build the map between field id and column index in Parquet schema.
             let mut column_map = HashMap::new();
 
             let fields = arrow_schema.fields();
-            let iceberg_schema = arrow_schema_to_schema(arrow_schema)?;
+            // Pre-project only the fields that have been selected, possibly avoiding converting
+            // some Arrow types that are not yet supported.
+            let mut projected_fields: HashMap<FieldRef, i32> = HashMap::new();
+            let projected_arrow_schema = ArrowSchema::new_with_metadata(
+                fields.filter_leaves(|_, f| {
+                    f.metadata()
+                        .get(PARQUET_FIELD_ID_META_KEY)
+                        .and_then(|field_id| i32::from_str(field_id).ok())
+                        .map_or(false, |field_id| {
+                            projected_fields.insert((*f).clone(), field_id);
+                            leaf_field_ids.contains(&field_id)
+                        })
+                }),
+                arrow_schema.metadata().clone(),
+            );
+            let iceberg_schema = arrow_schema_to_schema(&projected_arrow_schema)?;
+
             fields.filter_leaves(|idx, field| {
-                let field_id = field.metadata().get(PARQUET_FIELD_ID_META_KEY);
-                if field_id.is_none() {
+                let Some(field_id) = projected_fields.get(field).cloned() else {
                     return false;
-                }
-
-                let field_id = i32::from_str(field_id.unwrap());
-                if field_id.is_err() {
-                    return false;
-                }
-                let field_id = field_id.unwrap();
-
-                if !field_ids.contains(&field_id) {
-                    return false;
-                }
+                };
 
                 let iceberg_field = iceberg_schema_of_task.field_by_id(field_id);
                 let parquet_iceberg_field = iceberg_schema.field_by_id(field_id);
@@ -330,7 +369,13 @@ impl ArrowReader {
                     return false;
                 }
 
-                if iceberg_field.unwrap().field_type != parquet_iceberg_field.unwrap().field_type {
+                if !type_promotion_is_valid(
+                    parquet_iceberg_field
+                        .unwrap()
+                        .field_type
+                        .as_primitive_type(),
+                    iceberg_field.unwrap().field_type.as_primitive_type(),
+                ) {
                     return false;
                 }
 
@@ -338,19 +383,26 @@ impl ArrowReader {
                 true
             });
 
-            if column_map.len() != field_ids.len() {
+            if column_map.len() != leaf_field_ids.len() {
+                let missing_fields = leaf_field_ids
+                    .iter()
+                    .filter(|field_id| !column_map.contains_key(field_id))
+                    .collect::<Vec<_>>();
                 return Err(Error::new(
                     ErrorKind::DataInvalid,
                     format!(
                         "Parquet schema {} and Iceberg schema {} do not match.",
                         iceberg_schema, iceberg_schema_of_task
                     ),
-                ));
+                )
+                .with_context("column_map", format! {"{:?}", column_map})
+                .with_context("field_ids", format! {"{:?}", leaf_field_ids})
+                .with_context("missing_fields", format! {"{:?}", missing_fields}));
             }
 
             let mut indices = vec![];
-            for field_id in field_ids {
-                if let Some(col_idx) = column_map.get(field_id) {
+            for field_id in leaf_field_ids {
+                if let Some(col_idx) = column_map.get(&field_id) {
                     indices.push(*col_idx);
                 } else {
                     return Err(Error::new(
@@ -1100,13 +1152,20 @@ impl<R: FileRead> AsyncFileReader for ArrowFileReader<R> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use crate::arrow::reader::CollectFieldIdVisitor;
+    use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
+    use parquet::arrow::ProjectionMask;
+    use parquet::schema::parser::parse_message_type;
+    use parquet::schema::types::SchemaDescriptor;
+
+    use crate::arrow::reader::{CollectFieldIdVisitor, PARQUET_FIELD_ID_META_KEY};
+    use crate::arrow::ArrowReader;
     use crate::expr::visitors::bound_predicate_visitor::visit;
     use crate::expr::{Bind, Reference};
     use crate::spec::{NestedField, PrimitiveType, Schema, SchemaRef, Type};
+    use crate::ErrorKind;
 
     fn table_schema_simple() -> SchemaRef {
         Arc::new(
@@ -1179,5 +1238,90 @@ mod tests {
         expected.insert(3);
 
         assert_eq!(visitor.field_ids, expected);
+    }
+
+    #[test]
+    fn test_arrow_projection_mask() {
+        let schema = Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_identifier_field_ids(vec![1])
+                .with_fields(vec![
+                    NestedField::required(1, "c1", Type::Primitive(PrimitiveType::String)).into(),
+                    NestedField::optional(2, "c2", Type::Primitive(PrimitiveType::Int)).into(),
+                    NestedField::optional(
+                        3,
+                        "c3",
+                        Type::Primitive(PrimitiveType::Decimal {
+                            precision: 38,
+                            scale: 3,
+                        }),
+                    )
+                    .into(),
+                ])
+                .build()
+                .unwrap(),
+        );
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("c1", DataType::Utf8, false).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "1".to_string(),
+            )])),
+            // Type not supported
+            Field::new("c2", DataType::Duration(TimeUnit::Microsecond), true).with_metadata(
+                HashMap::from([(PARQUET_FIELD_ID_META_KEY.to_string(), "2".to_string())]),
+            ),
+            // Precision is beyond the supported range
+            Field::new("c3", DataType::Decimal128(39, 3), true).with_metadata(HashMap::from([(
+                PARQUET_FIELD_ID_META_KEY.to_string(),
+                "3".to_string(),
+            )])),
+        ]));
+
+        let message_type = "
+message schema {
+  required binary c1 (STRING) = 1;
+  optional int32 c2 (INTEGER(8,true)) = 2;
+  optional fixed_len_byte_array(17) c3 (DECIMAL(39,3)) = 3;
+}
+    ";
+        let parquet_type = parse_message_type(message_type).expect("should parse schema");
+        let parquet_schema = SchemaDescriptor::new(Arc::new(parquet_type));
+
+        // Try projecting the fields c2 and c3 with the unsupported data types
+        let err = ArrowReader::get_arrow_projection_mask(
+            &[1, 2, 3],
+            &schema,
+            &parquet_schema,
+            &arrow_schema,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
+        assert_eq!(
+            err.to_string(),
+            "DataInvalid => Unsupported Arrow data type: Duration(Microsecond)".to_string()
+        );
+
+        // Omitting field c2, we still get an error due to c3 being selected
+        let err = ArrowReader::get_arrow_projection_mask(
+            &[1, 3],
+            &schema,
+            &parquet_schema,
+            &arrow_schema,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
+        assert_eq!(
+            err.to_string(),
+            "DataInvalid => Failed to create decimal type, source: DataInvalid => Decimals with precision larger than 38 are not supported: 39".to_string()
+        );
+
+        // Finally avoid selecting fields with unsupported data types
+        let mask =
+            ArrowReader::get_arrow_projection_mask(&[1], &schema, &parquet_schema, &arrow_schema)
+                .expect("Some ProjectionMask");
+        assert_eq!(mask, ProjectionMask::leaves(&parquet_schema, vec![0]));
     }
 }

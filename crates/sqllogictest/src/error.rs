@@ -15,11 +15,32 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Iceberg Puffin implementation.
+use std::fmt::{Debug, Display, Formatter};
 
-#![deny(missing_docs)]
-// Temporarily allowing this while crate is under active development
-#![allow(dead_code)]
+pub struct Error(pub anyhow::Error);
 
-mod compression;
-pub use compression::CompressionCodec;
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl Debug for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+impl From<anyhow::Error> for Error {
+    fn from(value: anyhow::Error) -> Self {
+        Self(value)
+    }
+}
