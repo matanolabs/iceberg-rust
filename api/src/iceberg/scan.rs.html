@@ -1872,6 +1872,12 @@
 <a href="#1872" id="1872">1872</a>
 <a href="#1873" id="1873">1873</a>
 <a href="#1874" id="1874">1874</a>
+<a href="#1875" id="1875">1875</a>
+<a href="#1876" id="1876">1876</a>
+<a href="#1877" id="1877">1877</a>
+<a href="#1878" id="1878">1878</a>
+<a href="#1879" id="1879">1879</a>
+<a href="#1880" id="1880">1880</a>
 </pre></div><pre class="rust"><code><span class="comment">// Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -2122,7 +2128,7 @@
                 )
             })<span class="question-mark">?</span>;
 
-            <span class="kw">let </span>field = schema
+            schema
                 .as_struct()
                 .field_by_id(field_id)
                 .ok_or_else(|| {
@@ -2134,16 +2140,6 @@
                         ),
                     )
                 })<span class="question-mark">?</span>;
-
-            <span class="kw">if </span>!field.field_type.is_primitive() {
-                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::new(
-                    ErrorKind::FeatureUnsupported,
-                    <span class="macro">format!</span>(
-                        <span class="string">"Column {} is not a primitive type. Schema: {}"</span>,
-                        column_name, schema
-                    ),
-                ));
-            }
 
             field_ids.push(field_id);
         }
@@ -2238,9 +2234,8 @@
 
         <span class="kw">let </span>manifest_list = <span class="self">self</span>.plan_context.get_manifest_list().<span class="kw">await</span><span class="question-mark">?</span>;
 
-        <span class="comment">// get the [`ManifestFile`]s from the [`ManifestList`], filtering out any
-        // whose content type is not Data or whose partitions cannot match this
-        // scan's filter
+        <span class="comment">// get the [`ManifestFile`]s from the [`ManifestList`], filtering out
+        // partitions cannot match the scan's filter
         </span><span class="kw">let </span>manifest_file_contexts = <span class="self">self
             </span>.plan_context
             .build_manifest_file_contexts(manifest_list, manifest_entry_ctx_tx)<span class="question-mark">?</span>;
@@ -2296,8 +2291,11 @@
             arrow_reader_builder = arrow_reader_builder.with_batch_size(batch_size);
         }
 
-        arrow_reader_builder.build().read(<span class="self">self</span>.plan_files().<span class="kw">await</span><span class="question-mark">?</span>)
-    }
+        arrow_reader_builder
+            .build()
+            .read(<span class="self">self</span>.plan_files().<span class="kw">await</span><span class="question-mark">?</span>)
+            .<span class="kw">await
+    </span>}
 
     <span class="doccomment">/// Returns a reference to the column names of the table scan.
     </span><span class="kw">pub fn </span>column_names(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>[String]&gt; {
@@ -2493,15 +2491,22 @@
         manifest_list: Arc&lt;ManifestList&gt;,
         sender: Sender&lt;ManifestEntryContext&gt;,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;Box&lt;<span class="kw">impl </span>Iterator&lt;Item = <span class="prelude-ty">Result</span>&lt;ManifestFileContext&gt;&gt;&gt;&gt; {
-        <span class="kw">let </span>filtered_entries = manifest_list
-            .entries()
+        <span class="kw">let </span>entries = manifest_list.entries();
+
+        <span class="kw">if </span>entries
             .iter()
-            .filter(|manifest_file| manifest_file.content == ManifestContentType::Data);
+            .any(|e| e.content != ManifestContentType::Data)
+        {
+            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::new(
+                ErrorKind::FeatureUnsupported,
+                <span class="string">"Merge-on-read is not yet supported"</span>,
+            ));
+        }
 
         <span class="comment">// TODO: Ideally we could ditch this intermediate Vec as we return an iterator.
         </span><span class="kw">let </span><span class="kw-2">mut </span>filtered_mfcs = <span class="macro">vec!</span>[];
         <span class="kw">if </span><span class="self">self</span>.predicate.is_some() {
-            <span class="kw">for </span>manifest_file <span class="kw">in </span>filtered_entries {
+            <span class="kw">for </span>manifest_file <span class="kw">in </span>entries {
                 <span class="kw">let </span>partition_bound_predicate = <span class="self">self</span>.get_partition_filter(manifest_file)<span class="question-mark">?</span>;
 
                 <span class="comment">// evaluate the ManifestFile against the partition filter. Skip
@@ -2523,7 +2528,7 @@
                 }
             }
         } <span class="kw">else </span>{
-            <span class="kw">for </span>manifest_file <span class="kw">in </span>filtered_entries {
+            <span class="kw">for </span>manifest_file <span class="kw">in </span>entries {
                 <span class="kw">let </span>mfc = <span class="self">self</span>.create_manifest_file_context(manifest_file, <span class="prelude-val">None</span>, sender.clone());
                 filtered_mfcs.push(<span class="prelude-val">Ok</span>(mfc));
             }
@@ -2826,7 +2831,7 @@
 }
 
 <span class="attr">#[cfg(test)]
-</span><span class="kw">mod </span>tests {
+</span><span class="kw">pub mod </span>tests {
     <span class="kw">use </span>std::collections::HashMap;
     <span class="kw">use </span>std::fs;
     <span class="kw">use </span>std::fs::File;
@@ -2848,20 +2853,21 @@
     <span class="kw">use </span><span class="kw">crate</span>::io::{FileIO, OutputFile};
     <span class="kw">use </span><span class="kw">crate</span>::scan::FileScanTask;
     <span class="kw">use </span><span class="kw">crate</span>::spec::{
-        DataContentType, DataFileBuilder, DataFileFormat, Datum, FormatVersion, Literal, Manifest,
-        ManifestContentType, ManifestEntry, ManifestListWriter, ManifestMetadata, ManifestStatus,
-        ManifestWriter, NestedField, PrimitiveType, Schema, Struct, TableMetadata, Type,
+        DataContentType, DataFileBuilder, DataFileFormat, Datum, Literal, ManifestEntry,
+        ManifestListWriter, ManifestStatus, ManifestWriterBuilder, NestedField, PrimitiveType,
+        Schema, Struct, TableMetadata, Type,
     };
     <span class="kw">use </span><span class="kw">crate</span>::table::Table;
     <span class="kw">use </span><span class="kw">crate</span>::TableIdent;
 
-    <span class="kw">struct </span>TableTestFixture {
+    <span class="kw">pub struct </span>TableTestFixture {
         table_location: String,
-        table: Table,
+        <span class="kw">pub </span>table: Table,
     }
 
     <span class="kw">impl </span>TableTestFixture {
-        <span class="kw">fn </span>new() -&gt; <span class="self">Self </span>{
+        <span class="attr">#[allow(clippy::new_without_default)]
+        </span><span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
             <span class="kw">let </span>tmp_dir = TempDir::new().unwrap();
             <span class="kw">let </span>table_location = tmp_dir.path().join(<span class="string">"table1"</span>);
             <span class="kw">let </span>manifest_list1_location = table_location.join(<span class="string">"metadata/manifests_list_1.avro"</span>);
@@ -2914,7 +2920,7 @@
                 .unwrap()
         }
 
-        <span class="kw">async fn </span>setup_manifest_files(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+        <span class="kw">pub async fn </span>setup_manifest_files(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
             <span class="kw">let </span>current_snapshot = <span class="self">self</span>.table.metadata().current_snapshot().unwrap();
             <span class="kw">let </span>parent_snapshot = current_snapshot
                 .parent_snapshot(<span class="self">self</span>.table.metadata())
@@ -2923,20 +2929,16 @@
             <span class="kw">let </span>current_partition_spec = <span class="self">self</span>.table.metadata().default_partition_spec();
 
             <span class="comment">// Write data files
-            </span><span class="kw">let </span>data_file_manifest = ManifestWriter::new(
+            </span><span class="kw">let </span><span class="kw-2">mut </span>writer = ManifestWriterBuilder::new(
                 <span class="self">self</span>.next_manifest_file(),
-                current_snapshot.snapshot_id(),
+                <span class="prelude-val">Some</span>(current_snapshot.snapshot_id()),
                 <span class="macro">vec!</span>[],
+                current_schema.clone(),
+                current_partition_spec.as_ref().clone(),
             )
-            .write(Manifest::new(
-                ManifestMetadata::builder()
-                    .schema(current_schema.clone())
-                    .content(ManifestContentType::Data)
-                    .format_version(FormatVersion::V2)
-                    .partition_spec((<span class="kw-2">**</span>current_partition_spec).clone())
-                    .schema_id(current_schema.schema_id())
-                    .build(),
-                <span class="macro">vec!</span>[
+            .build_v2_data();
+            writer
+                .add_entry(
                     ManifestEntry::builder()
                         .status(ManifestStatus::Added)
                         .data_file(
@@ -2947,10 +2949,15 @@
                                 .file_size_in_bytes(<span class="number">100</span>)
                                 .record_count(<span class="number">1</span>)
                                 .partition(Struct::from_iter([<span class="prelude-val">Some</span>(Literal::long(<span class="number">100</span>))]))
+                                .key_metadata(<span class="prelude-val">None</span>)
                                 .build()
                                 .unwrap(),
                         )
                         .build(),
+                )
+                .unwrap();
+            writer
+                .add_delete_entry(
                     ManifestEntry::builder()
                         .status(ManifestStatus::Deleted)
                         .snapshot_id(parent_snapshot.snapshot_id())
@@ -2968,6 +2975,10 @@
                                 .unwrap(),
                         )
                         .build(),
+                )
+                .unwrap();
+            writer
+                .add_existing_entry(
                     ManifestEntry::builder()
                         .status(ManifestStatus::Existing)
                         .snapshot_id(parent_snapshot.snapshot_id())
@@ -2985,10 +2996,9 @@
                                 .unwrap(),
                         )
                         .build(),
-                ],
-            ))
-            .<span class="kw">await
-            </span>.unwrap();
+                )
+                .unwrap();
+            <span class="kw">let </span>data_file_manifest = writer.write_manifest_file().<span class="kw">await</span>.unwrap();
 
             <span class="comment">// Write to manifest list
             </span><span class="kw">let </span><span class="kw-2">mut </span>manifest_list_write = ManifestListWriter::v2(
@@ -3277,13 +3287,15 @@
         <span class="kw">let </span>batch_stream = reader
             .clone()
             .read(Box::pin(stream::iter(<span class="macro">vec!</span>[<span class="prelude-val">Ok</span>(plan_task.remove(<span class="number">0</span>))])))
-            .unwrap();
+            .<span class="kw">await
+            </span>.unwrap();
         <span class="kw">let </span>batche1: Vec&lt;<span class="kw">_</span>&gt; = batch_stream.try_collect().<span class="kw">await</span>.unwrap();
 
         <span class="kw">let </span>reader = ArrowReaderBuilder::new(fixture.table.file_io().clone()).build();
         <span class="kw">let </span>batch_stream = reader
             .read(Box::pin(stream::iter(<span class="macro">vec!</span>[<span class="prelude-val">Ok</span>(plan_task.remove(<span class="number">0</span>))])))
-            .unwrap();
+            .<span class="kw">await
+            </span>.unwrap();
         <span class="kw">let </span>batche2: Vec&lt;<span class="kw">_</span>&gt; = batch_stream.try_collect().<span class="kw">await</span>.unwrap();
 
         <span class="macro">assert_eq!</span>(batche1, batche2);
