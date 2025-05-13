@@ -28,6 +28,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    /// The operation was rejected because the system is not in a state required for the operation’s execution.
+    PreconditionFailed,
+
     /// Iceberg don't know what happened here, and no actions other than
     /// just returning it back. For example, iceberg returns an internal
     /// service error.
@@ -40,6 +43,19 @@ pub enum ErrorKind {
     ///
     /// The table could be invalid or corrupted.
     DataInvalid,
+
+    /// Iceberg namespace already exists at creation.
+    NamespaceAlreadyExists,
+
+    /// Iceberg table already exists at creation.
+    TableAlreadyExists,
+
+    /// Iceberg namespace already exists at creation.
+    NamespaceNotFound,
+
+    /// Iceberg table already exists at creation.
+    TableNotFound,
+
     /// Iceberg feature is not supported.
     ///
     /// This error is returned when given iceberg feature is not supported.
@@ -59,6 +75,11 @@ impl From<ErrorKind> for &'static str {
             ErrorKind::Unexpected => "Unexpected",
             ErrorKind::DataInvalid => "DataInvalid",
             ErrorKind::FeatureUnsupported => "FeatureUnsupported",
+            ErrorKind::TableAlreadyExists => "TableAlreadyExists",
+            ErrorKind::TableNotFound => "TableNotFound",
+            ErrorKind::NamespaceAlreadyExists => "NamespaceAlreadyExists",
+            ErrorKind::NamespaceNotFound => "NamespaceNotFound",
+            ErrorKind::PreconditionFailed => "PreconditionFailed",
         }
     }
 }
@@ -268,7 +289,7 @@ define_from_err!(
 define_from_err!(
     std::array::TryFromSliceError,
     ErrorKind::DataInvalid,
-    "failed to convert byte slive to array"
+    "failed to convert byte slice to array"
 );
 
 define_from_err!(

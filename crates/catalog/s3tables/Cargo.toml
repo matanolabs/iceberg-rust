@@ -16,25 +16,26 @@
 # under the License.
 
 [package]
-name = "iceberg-catalog-s3tables"
-version = { workspace = true }
 edition = { workspace = true }
 homepage = { workspace = true }
-rust-version = "1.81.0"
+name = "iceberg-catalog-s3tables"
+rust-version = { workspace = true }
+version = { workspace = true }
 
 categories = ["database"]
 description = "Apache Iceberg Rust S3Tables Catalog"
-repository = { workspace = true }
-license = { workspace = true }
 keywords = ["iceberg", "sql", "catalog"]
+license = { workspace = true }
+repository = { workspace = true }
 
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 aws-config = { workspace = true }
-aws-sdk-s3tables = "1.4.0"
+aws-sdk-s3tables = "1.10.0"
 iceberg = { workspace = true }
 serde_json = { workspace = true }
+typed-builder = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]

@@ -24,18 +24,19 @@ use aws_sdk_s3tables::operation::get_namespace::GetNamespaceOutput;
 use aws_sdk_s3tables::operation::get_table::GetTableOutput;
 use aws_sdk_s3tables::operation::list_tables::ListTablesOutput;
 use aws_sdk_s3tables::types::OpenTableFormat;
-use iceberg::io::FileIO;
+use iceberg::io::{FileIO, FileIOBuilder};
 use iceberg::spec::{TableMetadata, TableMetadataBuilder};
 use iceberg::table::Table;
 use iceberg::{
     Catalog, Error, ErrorKind, Namespace, NamespaceIdent, Result, TableCommit, TableCreation,
     TableIdent,
 };
+use typed_builder::TypedBuilder;
 
 use crate::utils::{create_metadata_location, create_sdk_config};
 
 /// S3Tables catalog configuration.
-#[derive(Debug)]
+#[derive(Debug, TypedBuilder)]
 pub struct S3TablesCatalogConfig {
     /// Unlike other buckets, S3Tables bucket is not a physical bucket, but a virtual bucket
     /// that is managed by s3tables. We can't directly access the bucket with path like
@@ -48,8 +49,10 @@ pub struct S3TablesCatalogConfig {
     /// - `aws_access_key_id`: The AWS access key ID to use.
     /// - `aws_secret_access_key`: The AWS secret access key to use.
     /// - `aws_session_token`: The AWS session token to use.
+    #[builder(default)]
     properties: HashMap<String, String>,
     /// Endpoint URL for the catalog.
+    #[builder(default, setter(strip_option(fallback = endpoint_url_opt)))]
     endpoint_url: Option<String>,
 }
 
@@ -67,19 +70,7 @@ impl S3TablesCatalog {
         let aws_config = create_sdk_config(&config.properties, config.endpoint_url.clone()).await;
         let s3tables_client = aws_sdk_s3tables::Client::new(&aws_config);
 
-        // parse bucket name from ARN format like: arn:aws:s3:<region>:<account>:bucket/<bucket_name>
-        let bucket_name = config
-            .table_bucket_arn
-            .rsplit(":bucket/")
-            .next()
-            .ok_or_else(|| {
-                Error::new(
-                    ErrorKind::DataInvalid,
-                    format!("Invalid bucket ARN format: {}", config.table_bucket_arn),
-                )
-            })?;
-
-        let file_io = FileIO::from_path(&format!("s3://{}", bucket_name))?
+        let file_io = FileIOBuilder::new("s3")
             .with_props(&config.properties)
             .build()?;
 
@@ -498,7 +489,7 @@ pub(crate) fn from_aws_sdk_error<T>(error: aws_sdk_s3tables::error::SdkError<T>)
 where T: std::fmt::Debug {
     Error::new(
         ErrorKind::Unexpected,
-        "Operation failed for hitting aws skd error".to_string(),
+        "Operation failed for hitting aws sdk error".to_string(),
     )
     .with_source(anyhow!("aws sdk error: {:?}", error))
 }
@@ -515,12 +506,9 @@ mod tests {
             None => return Ok(None),
         };
 
-        let properties = HashMap::new();
-        let config = S3TablesCatalogConfig {
-            table_bucket_arn,
-            properties,
-            endpoint_url: None,
-        };
+        let config = S3TablesCatalogConfig::builder()
+            .table_bucket_arn(table_bucket_arn)
+            .build();
 
         Ok(Some(S3TablesCatalog::new(config).await?))
     }
